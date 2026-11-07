@@ -10,3 +10,15 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_RECIPIENT
+        sync: false
+      - key: WHATSAPP_TEMPLATE_NAME
+        sync: false
+      - key: WHATSAPP_TEMPLATE_LANGUAGE
+        value: es
+      - key: WHATSAPP_GRAPH_API_VERSION
+        value: v22.0

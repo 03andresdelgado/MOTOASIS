@@ -1,6 +1,12 @@
+import asyncio
+import json
+import logging
 import os
+import re
 import secrets
 from datetime import datetime
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -9,6 +15,81 @@ from pydantic import BaseModel
 
 app = FastAPI()
 security = HTTPBasic()
+logger = logging.getLogger(__name__)
+
+
+def enviar_notificacion_whatsapp(viaje):
+    configuracion = {
+        "WHATSAPP_ACCESS_TOKEN": os.getenv("WHATSAPP_ACCESS_TOKEN"),
+        "WHATSAPP_PHONE_NUMBER_ID": os.getenv("WHATSAPP_PHONE_NUMBER_ID"),
+        "WHATSAPP_RECIPIENT": os.getenv("WHATSAPP_RECIPIENT"),
+        "WHATSAPP_TEMPLATE_NAME": os.getenv("WHATSAPP_TEMPLATE_NAME"),
+    }
+    faltantes = [nombre for nombre, valor in configuracion.items() if not valor]
+    if faltantes:
+        logger.warning(
+            "No se envió el aviso de WhatsApp; faltan variables: %s",
+            ", ".join(faltantes),
+        )
+        return False
+
+    destinatario = re.sub(r"\D", "", configuracion["WHATSAPP_RECIPIENT"])
+    if not destinatario:
+        logger.error("WHATSAPP_RECIPIENT no contiene un número válido.")
+        return False
+
+    api_version = os.getenv("WHATSAPP_GRAPH_API_VERSION", "v22.0").strip("/")
+    idioma = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es")
+    parametros = [
+        str(viaje["id_viaje"]),
+        viaje.get("nombre") or "No indicado",
+        viaje.get("telefono") or "No indicado",
+        viaje.get("origen") or "No indicado",
+        viaje.get("destino") or "No indicado",
+    ]
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": destinatario,
+        "type": "template",
+        "template": {
+            "name": configuracion["WHATSAPP_TEMPLATE_NAME"],
+            "language": {"code": idioma},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": parametro}
+                        for parametro in parametros
+                    ],
+                }
+            ],
+        },
+    }
+    solicitud = Request(
+        "https://graph.facebook.com/"
+        f"{api_version}/{configuracion['WHATSAPP_PHONE_NUMBER_ID']}/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {configuracion['WHATSAPP_ACCESS_TOKEN']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(solicitud, timeout=10) as respuesta:
+            if respuesta.status not in (200, 201):
+                logger.error("WhatsApp API respondió con HTTP %s.", respuesta.status)
+                return False
+    except HTTPError as error:
+        detalle = error.read().decode("utf-8", "replace")
+        logger.error("WhatsApp API respondió con HTTP %s: %s", error.code, detalle)
+        return False
+    except (URLError, TimeoutError) as error:
+        logger.error("No se pudo contactar a WhatsApp API: %s", error)
+        return False
+
+    return True
 
 
 def verificar_admin(credenciales: HTTPBasicCredentials = Depends(security)):
@@ -117,7 +198,9 @@ async def pagina_solicitar():
               const contenido = await respuesta.json();
               if (!respuesta.ok) throw new Error(contenido.detail || "No se pudo enviar la solicitud.");
               resultado.className = "ok";
-              resultado.textContent = "¡Solicitud recibida! Tu número de viaje es #" + contenido.data.id_viaje + ".";
+              resultado.textContent = contenido.data.notificacion_whatsapp === "enviada"
+                ? "¡Solicitud recibida! El aviso fue enviado por WhatsApp. Tu número de viaje es #" + contenido.data.id_viaje + "."
+                : "¡Solicitud recibida! Tu número de viaje es #" + contenido.data.id_viaje + ". El aviso por WhatsApp no se pudo enviar; contacta directamente al operador.";
               form.reset();
             } catch (error) {
               resultado.className = "error";
@@ -172,7 +255,7 @@ async def pagina_viajes():
             <thead>
               <tr>
                 <th>ID viaje</th><th>Pasajero</th><th>Teléfono</th><th>ID conductor</th>
-                <th>Estado</th><th>Origen</th><th>Destino</th><th>Fecha de creación</th>
+                <th>Estado</th><th>Origen</th><th>Destino</th><th>Aviso WhatsApp</th><th>Fecha de creación</th>
               </tr>
             </thead>
             <tbody id="viajes"></tbody>
@@ -200,6 +283,7 @@ async def pagina_viajes():
                   viaje.estado,
                   viaje.origen || viaje.coordenadas_origen.join(", "),
                   viaje.destino || viaje.coordenadas_destino.join(", "),
+                  viaje.notificacion_whatsapp || "Pendiente",
                   new Date(viaje.fecha_creacion).toLocaleString()
                 ];
                 for (const valor of valores) {
@@ -240,10 +324,17 @@ async def solicitar_mototaxi_desde_web(solicitud: SolicitudViajeWeb):
         "destino": solicitud.destino,
         "coordenadas_origen": None,
         "coordenadas_destino": None,
+        "notificacion_whatsapp": "pendiente",
         "fecha_creacion": datetime.now(),
     }
 
     viajes_db.append(nuevo_viaje)
+    notificacion_enviada = await asyncio.to_thread(
+        enviar_notificacion_whatsapp, nuevo_viaje
+    )
+    nuevo_viaje["notificacion_whatsapp"] = (
+        "enviada" if notificacion_enviada else "pendiente"
+    )
     return {"status": "success", "data": nuevo_viaje}
 
 
