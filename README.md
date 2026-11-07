@@ -26,3 +26,9 @@ No publiques el token ni lo guardes en el repositorio. El número receptor debe
 haber aceptado recibir estos avisos. Las solicitudes se reciben aunque la
 notificación de WhatsApp no pueda enviarse; el resultado se muestra en `/viajes`
 y el detalle del error queda en los logs de Render.
+
+El formulario también permite que el pasajero pulse **Usar mi ubicación actual**
+para compartir su punto de recogida por GPS. El navegador solicitará permiso de
+ubicación; se requiere HTTPS y el enlace del mapa se incluye en el aviso de
+WhatsApp cuando la integración está configurada. Si el pasajero cambia el campo
+de recogida después de elegir GPS, se enviará la dirección escrita en su lugar.

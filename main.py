@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 from datetime import datetime
+from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -47,6 +48,13 @@ def enviar_notificacion_whatsapp(viaje):
         viaje.get("origen") or "No indicado",
         viaje.get("destino") or "No indicado",
     ]
+    coordenadas_origen = viaje.get("coordenadas_origen")
+    if coordenadas_origen:
+        enlace_ubicacion = (
+            "https://maps.google.com/?q="
+            f"{coordenadas_origen[1]},{coordenadas_origen[0]}"
+        )
+        parametros[3] = f"{parametros[3]} | Ubicación: {enlace_ubicacion}"
     payload = {
         "messaging_product": "whatsapp",
         "to": destinatario,
@@ -129,6 +137,8 @@ class SolicitudViajeWeb(BaseModel):
     telefono: str
     origen: str
     destino: str
+    origen_lat: Optional[float] = None
+    origen_lng: Optional[float] = None
 
 
 # Simulación de colección/tabla de viajes en la base de datos
@@ -154,6 +164,7 @@ async def pagina_solicitar():
           input, textarea { border: 1px solid #aeb8c2; border-radius: 6px; margin-top: .35rem; }
           textarea { min-height: 85px; resize: vertical; }
           button { background: #16794b; border: 0; border-radius: 6px; color: white; cursor: pointer; font-weight: 700; margin-top: 1.25rem; }
+          #ubicacion { background: #1769aa; margin-top: .5rem; }
           button:disabled { cursor: wait; opacity: .65; }
           #resultado { margin-top: 1rem; }
           .error { color: #b42318; }
@@ -173,6 +184,8 @@ async def pagina_solicitar():
           <label>¿Dónde te recogemos?
             <textarea name="origen" maxlength="500" required></textarea>
           </label>
+          <button id="ubicacion" type="button">Usar mi ubicación actual</button>
+          <p id="estado-ubicacion" role="status"></p>
           <label>¿A dónde vas?
             <textarea name="destino" maxlength="500" required></textarea>
           </label>
@@ -182,7 +195,43 @@ async def pagina_solicitar():
         <script>
           const form = document.getElementById("solicitud");
           const button = document.getElementById("enviar");
+          const botonUbicacion = document.getElementById("ubicacion");
+          const estadoUbicacion = document.getElementById("estado-ubicacion");
+          let ubicacionSeleccionada = null;
           const resultado = document.getElementById("resultado");
+          botonUbicacion.addEventListener("click", () => {
+            if (!navigator.geolocation) {
+              estadoUbicacion.textContent = "Este navegador no permite obtener la ubicación.";
+              return;
+            }
+            botonUbicacion.disabled = true;
+            estadoUbicacion.textContent = "Obteniendo ubicación...";
+            navigator.geolocation.getCurrentPosition(
+              (posicion) => {
+                const { latitude, longitude } = posicion.coords;
+                ubicacionSeleccionada = { origen_lat: latitude, origen_lng: longitude };
+                form.elements.origen.value = "Ubicación GPS compartida";
+                estadoUbicacion.textContent = "Ubicación agregada. Puedes editar la dirección si lo necesitas.";
+                botonUbicacion.disabled = false;
+              },
+              (error) => {
+                const mensajes = {
+                  1: "Permite el acceso a la ubicación en tu navegador para continuar.",
+                  2: "No se pudo determinar tu ubicación. Inténtalo otra vez.",
+                  3: "La solicitud de ubicación tardó demasiado. Inténtalo otra vez."
+                };
+                estadoUbicacion.textContent = mensajes[error.code] || "No se pudo obtener la ubicación.";
+                botonUbicacion.disabled = false;
+              },
+              { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+            );
+          });
+          form.elements.origen.addEventListener("input", () => {
+            if (ubicacionSeleccionada) {
+              ubicacionSeleccionada = null;
+              estadoUbicacion.textContent = "Se usará la dirección escrita, sin ubicación GPS.";
+            }
+          });
           form.addEventListener("submit", async (event) => {
             event.preventDefault();
             button.disabled = true;
@@ -190,6 +239,7 @@ async def pagina_solicitar():
             resultado.textContent = "Enviando solicitud...";
             try {
               const datos = Object.fromEntries(new FormData(form));
+              if (ubicacionSeleccionada) Object.assign(datos, ubicacionSeleccionada);
               const respuesta = await fetch("/api/v1/viajes/solicitar-web", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -202,6 +252,8 @@ async def pagina_solicitar():
                 ? "¡Solicitud recibida! El aviso fue enviado por WhatsApp. Tu número de viaje es #" + contenido.data.id_viaje + "."
                 : "¡Solicitud recibida! Tu número de viaje es #" + contenido.data.id_viaje + ". El aviso por WhatsApp no se pudo enviar; contacta directamente al operador.";
               form.reset();
+              ubicacionSeleccionada = null;
+              estadoUbicacion.textContent = "";
             } catch (error) {
               resultado.className = "error";
               resultado.textContent = "Error: " + error.message;
@@ -281,7 +333,11 @@ async def pagina_viajes():
                   viaje.telefono || "—",
                   viaje.id_conductor ?? "Sin asignar",
                   viaje.estado,
-                  viaje.origen || viaje.coordenadas_origen.join(", "),
+                  viaje.origen || (
+                    viaje.coordenadas_origen
+                      ? viaje.coordenadas_origen.join(", ")
+                      : "—"
+                  ),
                   viaje.destino || viaje.coordenadas_destino.join(", "),
                   viaje.notificacion_whatsapp || "Pendiente",
                   new Date(viaje.fecha_creacion).toLocaleString()
@@ -322,7 +378,12 @@ async def solicitar_mototaxi_desde_web(solicitud: SolicitudViajeWeb):
         "estado": "buscando_conductor",
         "origen": solicitud.origen,
         "destino": solicitud.destino,
-        "coordenadas_origen": None,
+        "coordenadas_origen": (
+            [solicitud.origen_lng, solicitud.origen_lat]
+            if solicitud.origen_lat is not None
+            and solicitud.origen_lng is not None
+            else None
+        ),
         "coordenadas_destino": None,
         "notificacion_whatsapp": "pendiente",
         "fecha_creacion": datetime.now(),
